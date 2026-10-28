@@ -1,0 +1,128 @@
+# Se copia a ~/servicios/coach/ en el VPS (tools/deploy.mjs). Sin `ports:` a propósito:
+# la app solo se alcanza por el túnel de Cloudflare (red `proxy`) y Postgres solo desde la red interna.
+services:
+  app:
+    image: paquito-coach:2.3.0
+    container_name: coach
+    restart: unless-stopped
+    # Docker del VPS es rootless: el root del contenedor es el usuario del host, sin privilegios reales.
+    user: "0:0"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://coach:${POSTGRES_PASSWORD}@db:5432/coach
+      DATA_DIR: /app/data
+    # Fotos del chat (DATA_DIR/media). El contenedor es de solo lectura salvo este volumen.
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      db: { condition: service_healthy }
+    mem_limit: 512m
+    cpus: 1.0
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+    networks: [proxy, internal]
+
+  db:
+    image: postgres:17-alpine
+    container_name: coach-db
+    restart: unless-stopped
+    # Q1: estadísticas de consultas (tools/slow-queries.mjs) y aviso en el log de las que pasen de 500 ms.
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "pg_stat_statements.track=top", "-c", "log_min_duration_statement=500", "-c", "log_parameter_max_length=0"]
+    environment:
+      POSTGRES_USER: coach
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: coach
+    volumes: [coach-db:/var/lib/postgresql/data]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coach"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 512m
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+    networks: [internal]
+
+  # Copia diaria con pg_dump (14 días) en ./backups; tools/pull-backups.sh la trae al Mac.
+  backup:
+    image: postgres:17-alpine
+    container_name: coach-backup
+    restart: unless-stopped
+    user: "0:0"
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes: [./backups:/backups, ./data:/data:ro]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          f=/backups/coach-$$(date +%F).sql.gz
+          pg_dump -h db -U coach -d coach --no-owner | gzip > $$f.tmp && mv $$f.tmp $$f && echo "backup ok $$f"
+          find /backups -name 'coach-*.sql.gz' -mtime +14 -delete
+          tar -czf /backups/media-$$(date +%F).tar.gz -C /data media 2>/dev/null && find /backups -name 'media-*.tar.gz' -mtime +14 -delete
+          sleep 86400
+        done
+    depends_on:
+      db: { condition: service_healthy }
+    networks: [internal]
+
+  # ── Demo pública (ADR 0009): misma imagen, base de datos PROPIA, se re-siembra cada noche. ──
+  demo:
+    image: paquito-coach:2.3.0
+    container_name: coach-demo
+    restart: unless-stopped
+    user: "0:0"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    environment:
+      NODE_ENV: production
+      DEMO_MODE: "1"
+      APP_VERSION: ${APP_VERSION}
+      DATABASE_URL: postgres://coach:${DEMO_POSTGRES_PASSWORD}@demo-db:5432/coach
+      PUBLIC_URL: ${DEMO_PUBLIC_URL}
+      ALLOWED_ORIGINS: ${DEMO_PUBLIC_URL}
+      HOST_STUDIOS: ${DEMO_HOST_STUDIOS}
+      DATA_DIR: /tmp
+      LOG_LEVEL: warn
+    tmpfs: [/tmp]
+    depends_on:
+      demo-db: { condition: service_healthy }
+    mem_limit: 384m
+    cpus: 0.5
+    logging: { driver: json-file, options: { max-size: "5m", max-file: "2" } }
+    networks: [proxy, demo-internal]
+
+  demo-db:
+    image: postgres:17-alpine
+    container_name: coach-demo-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: coach
+      POSTGRES_PASSWORD: ${DEMO_POSTGRES_PASSWORD}
+      POSTGRES_DB: coach
+    volumes: [coach-demo-db:/var/lib/postgresql/data]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coach"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 256m
+    logging: { driver: json-file, options: { max-size: "5m", max-file: "2" } }
+    networks: [demo-internal]
+
+volumes:
+  coach-db:
+  coach-demo-db:
+
+networks:
+  proxy:
+    external: true
+  internal:
+    internal: true
+  # La demo no ve la base de datos de producción (redes internas separadas).
+  demo-internal:
+    internal: true

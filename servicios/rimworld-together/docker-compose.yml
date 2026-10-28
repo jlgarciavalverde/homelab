@@ -1,0 +1,16 @@
+services:
+  rimworld-together:
+    build: .
+    image: rimworld-together:local
+    container_name: rimworld-together
+    restart: unless-stopped
+    user: "0:0"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stdin_open: true
+    tty: true
+    ports:
+      - "25555:25555/tcp"
+    volumes:
+      - ./data:/srv
+    stop_grace_period: 30s
