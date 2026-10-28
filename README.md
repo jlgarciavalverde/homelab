@@ -93,7 +93,6 @@ servicios/<nombre>/   docker-compose.yml + .env.example de cada servicio
 host/                 endurecimiento de SSH y fail2ban
 scripts/backup.sh     copia local de Nextcloud y compra
 docs/                 documentación
-linkedin/             borrador del post de presentación
 ```
 
 ## Licencia
